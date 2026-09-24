@@ -8,9 +8,9 @@ use std::{
 };
 use wit_bindgen_core::{
     abi::{self, AbiVariant, Bindgen, Bitcast, Instruction, LiftLower, WasmType},
-    uwrite, uwriteln,
+    dealias, uwrite, uwriteln,
     wit_parser::{
-        Alignment, ArchitectureSize, Docs, Enum, Flags, FlagsRepr, Function, FunctionKind, Int,
+        Alignment, ArchitectureSize, Docs, Enum, Flags, FlagsRepr, Function, Handle, Int,
         InterfaceId, Record, Resolve, Result_, SizeAlign, Tuple, Type, TypeDef, TypeDefKind,
         TypeId, TypeOwner, Variant, WorldId, WorldKey,
     },
@@ -62,6 +62,7 @@ pub struct TeaVmJava {
     world_fragments: Vec<InterfaceFragment>,
     sizes: SizeAlign,
     interface_names: HashMap<InterfaceId, String>,
+    resource_directions: HashMap<TypeId, Direction>,
 }
 
 impl TeaVmJava {
@@ -69,13 +70,21 @@ impl TeaVmJava {
         format!("{}.", self.name)
     }
 
-    fn interface<'a>(&'a mut self, resolve: &'a Resolve, name: &'a str) -> InterfaceGenerator<'a> {
+    fn interface<'a>(
+        &'a mut self,
+        resolve: &'a Resolve,
+        name: &'a str,
+        is_import: bool,
+        import_module: Option<String>,
+    ) -> InterfaceGenerator<'a> {
         InterfaceGenerator {
             src: String::new(),
             stub: String::new(),
             gen: self,
             resolve,
             name,
+            is_import,
+            import_module,
         }
     }
 }
@@ -95,7 +104,12 @@ impl WorldGenerator for TeaVmJava {
     ) -> Result<()> {
         let name = interface_name(resolve, key, Direction::Import);
         self.interface_names.insert(id, name.clone());
-        let mut gen = self.interface(resolve, &name);
+        for ty in resolve.interfaces[id].types.values() {
+            if matches!(resolve.types[*ty].kind, TypeDefKind::Resource) {
+                self.resource_directions.insert(*ty, Direction::Import);
+            }
+        }
+        let mut gen = self.interface(resolve, &name, true, Some(resolve.name_world_key(key)));
         gen.types(id);
 
         for (_, func) in resolve.interfaces[id].functions.iter() {
@@ -115,7 +129,7 @@ impl WorldGenerator for TeaVmJava {
         _files: &mut Files,
     ) {
         let name = world_name(resolve, world);
-        let mut gen = self.interface(resolve, &name);
+        let mut gen = self.interface(resolve, &name, true, Some("$root".to_owned()));
 
         for (_, func) in funcs {
             gen.import("$root", func);
@@ -133,7 +147,12 @@ impl WorldGenerator for TeaVmJava {
     ) -> Result<()> {
         let name = interface_name(resolve, key, Direction::Export);
         self.interface_names.insert(id, name.clone());
-        let mut gen = self.interface(resolve, &name);
+        for ty in resolve.interfaces[id].types.values() {
+            if matches!(resolve.types[*ty].kind, TypeDefKind::Resource) {
+                self.resource_directions.insert(*ty, Direction::Export);
+            }
+        }
+        let mut gen = self.interface(resolve, &name, false, Some(resolve.name_world_key(key)));
         gen.types(id);
 
         for (_, func) in resolve.interfaces[id].functions.iter() {
@@ -152,7 +171,7 @@ impl WorldGenerator for TeaVmJava {
         _files: &mut Files,
     ) -> Result<()> {
         let name = world_name(resolve, world);
-        let mut gen = self.interface(resolve, &name);
+        let mut gen = self.interface(resolve, &name, false, None);
 
         for (_, func) in funcs {
             gen.export(None, func);
@@ -170,7 +189,7 @@ impl WorldGenerator for TeaVmJava {
         _files: &mut Files,
     ) {
         let name = world_name(resolve, world);
-        let mut gen = self.interface(resolve, &name);
+        let mut gen = self.interface(resolve, &name, true, Some("$root".to_owned()));
 
         for (ty_name, ty) in types {
             gen.define_type(ty_name, *ty);
@@ -444,6 +463,8 @@ struct InterfaceGenerator<'a> {
     gen: &'a mut TeaVmJava,
     resolve: &'a Resolve,
     name: &'a str,
+    is_import: bool,
+    import_module: Option<String>,
 }
 
 impl InterfaceGenerator<'_> {
@@ -482,10 +503,6 @@ impl InterfaceGenerator<'_> {
     }
 
     fn import(&mut self, module: &str, func: &Function) {
-        if func.kind != FunctionKind::Freestanding {
-            todo!("resources");
-        }
-
         let mut bindgen = FunctionBindgen::new(
             self,
             &func.name,
@@ -576,6 +593,7 @@ impl InterfaceGenerator<'_> {
 
         assert!(!bindgen.needs_cleanup_list);
 
+        let borrowed_resource_declarations = bindgen.borrowed_resource_declarations.join("");
         let src = bindgen.src;
 
         let result_type = match &sig.results[..] {
@@ -602,6 +620,7 @@ impl InterfaceGenerator<'_> {
             r#"
             @Export(name = "{export_name}")
             private static {result_type} wasmExport{camel_name}({params}) {{
+                {borrowed_resource_declarations}
                 {src}
             }}
             "#
@@ -716,6 +735,12 @@ impl InterfaceGenerator<'_> {
                         let err = name(&result.err);
 
                         format!("{}Result<{ok}, {err}>", self.gen.qualifier())
+                    }
+                    TypeDefKind::Handle(handle) => {
+                        let resource = match handle {
+                            Handle::Own(id) | Handle::Borrow(id) => *id,
+                        };
+                        self.type_name_with_qualifier(&Type::Id(resource), qualifier)
                     }
                     _ => {
                         if let Some(name) = &ty.name {
@@ -877,9 +902,151 @@ impl<'a> wit_bindgen_core::InterfaceGenerator<'a> for InterfaceGenerator<'a> {
         );
     }
 
-    fn type_resource(&mut self, id: TypeId, name: &str, docs: &Docs) {
-        _ = (id, name, docs);
-        todo!()
+    fn type_resource(&mut self, _id: TypeId, name: &str, docs: &Docs) {
+        self.print_docs(docs);
+
+        let wit_name = name;
+        let name = name.to_upper_camel_case();
+        let drop_name = format!("wasmImport{name}Drop");
+
+        if self.is_import {
+            let module = self
+                .import_module
+                .as_deref()
+                .expect("import interfaces must have an import module");
+            uwrite!(
+                self.src,
+                "
+                @Import(name = \"[resource-drop]{wit_name}\", module = \"{module}\")
+                private static native void {drop_name}(int handle);
+                "
+            );
+        }
+
+        let lifecycle = if self.is_import {
+            format!(
+                "
+                public int rawHandle() {{
+                    return handle;
+                }}
+
+                public int takeHandle() {{
+                    if (!owned) {{
+                        throw new IllegalStateException(\"resource handle is borrowed or already moved\");
+                    }}
+                    owned = false;
+                    return handle;
+                }}
+
+                public void close() {{
+                    if (owned) {{
+                        {drop_name}(handle);
+                        owned = false;
+                    }}
+                }}
+
+                public void releaseBorrow() {{
+                    if (!owned && handle != 0) {{
+                        {drop_name}(handle);
+                        handle = 0;
+                    }}
+                }}"
+            )
+        } else {
+            let module = self
+                .import_module
+                .as_deref()
+                .expect("export interfaces must have an ABI module");
+            format!(
+                "
+                private static final ArrayList<{name}> RESOURCE_REPS = new ArrayList<>();
+
+                @Import(name = \"[resource-new]{wit_name}\", module = \"[export]{module}\")
+                private static native int wasmResourceNew(int rep);
+
+                @Import(name = \"[resource-rep]{wit_name}\", module = \"[export]{module}\")
+                private static native int wasmResourceRep(int handle);
+
+                @Import(name = \"[resource-drop]{wit_name}\", module = \"[export]{module}\")
+                private static native void wasmResourceDrop(int handle);
+
+                @Export(name = \"{module}#[dtor]{wit_name}\")
+                private static void wasmResourceDtor(int rep) {{
+                    if (rep < 0 || rep >= RESOURCE_REPS.size()) {{
+                        throw new IllegalStateException(\"invalid resource representation\");
+                    }}
+                    {name} value = RESOURCE_REPS.get(rep);
+                    RESOURCE_REPS.set(rep, null);
+                    if (value != null) {{
+                        value.handle = 0;
+                        value.owned = false;
+                    }}
+                }}
+
+                public int rawHandle() {{
+                    return handle;
+                }}
+
+                public int takeHandle() {{
+                    if (!owned) {{
+                        throw new IllegalStateException(\"resource handle is borrowed or already moved\");
+                    }}
+                    if (handle == 0) {{
+                        int rep = RESOURCE_REPS.size();
+                        RESOURCE_REPS.add(this);
+                        handle = wasmResourceNew(rep);
+                    }}
+                    owned = false;
+                    return handle;
+                }}
+
+                public void close() {{
+                    if (owned && handle != 0) {{
+                        wasmResourceDrop(handle);
+                        handle = 0;
+                        owned = false;
+                    }}
+                }}
+
+                public static {name} fromOwnedHandle(int handle) {{
+                    int rep = wasmResourceRep(handle);
+                    if (rep < 0 || rep >= RESOURCE_REPS.size()) {{
+                        throw new IllegalStateException(\"invalid resource representation\");
+                    }}
+                    {name} value = RESOURCE_REPS.get(rep);
+                    if (value == null) {{
+                        throw new IllegalStateException(\"resource representation was dropped\");
+                    }}
+                    value.handle = handle;
+                    value.owned = true;
+                    return value;
+                }}
+
+                public static {name} fromBorrowedHandle(int rep) {{
+                    if (rep < 0 || rep >= RESOURCE_REPS.size() || RESOURCE_REPS.get(rep) == null) {{
+                        throw new IllegalStateException(\"invalid borrowed resource representation\");
+                    }}
+                    return RESOURCE_REPS.get(rep);
+                }}"
+            )
+        };
+
+        uwrite!(
+            self.src,
+            "
+            public static final class {name} {{
+                public int handle;
+                private boolean owned;
+
+                public {name}(int handle, boolean owned) {{
+                    this.handle = handle;
+                    this.owned = owned;
+                }}
+
+                {lifecycle}
+            }}
+            "
+        );
     }
 
     fn type_flags(&mut self, _id: TypeId, name: &str, flags: &Flags, docs: &Docs) {
@@ -1102,6 +1269,8 @@ struct FunctionBindgen<'a, 'b> {
     blocks: Vec<Block>,
     payloads: Vec<String>,
     cleanup: Vec<Cleanup>,
+    borrowed_resource_declarations: Vec<String>,
+    borrowed_resources: Vec<String>,
     needs_cleanup_list: bool,
 }
 
@@ -1121,6 +1290,8 @@ impl<'a, 'b> FunctionBindgen<'a, 'b> {
             blocks: Vec::new(),
             payloads: Vec::new(),
             cleanup: Vec::new(),
+            borrowed_resource_declarations: Vec::new(),
+            borrowed_resources: Vec::new(),
             needs_cleanup_list: false,
         }
     }
@@ -1373,7 +1544,49 @@ impl Bindgen for FunctionBindgen<'_, '_> {
                 }
             },
 
-            Instruction::HandleLower { .. } | Instruction::HandleLift { .. } => todo!(),
+            Instruction::HandleLower { handle, .. } => {
+                let op = &operands[0];
+                let expression = match handle {
+                    Handle::Own(_) => format!("({op}).takeHandle()"),
+                    Handle::Borrow(_) => format!("({op}).rawHandle()"),
+                };
+                results.push(expression);
+            }
+
+            Instruction::HandleLift { handle, .. } => {
+                let op = &operands[0];
+                let resource = match handle {
+                    Handle::Own(resource) | Handle::Borrow(resource) => *resource,
+                };
+                let resource = dealias(self.gen.resolve, resource);
+                let name = self.gen.type_name_with_qualifier(&Type::Id(resource), true);
+                let owned = matches!(handle, Handle::Own(_));
+                if !owned
+                    && !self.gen.is_import
+                    && matches!(
+                    self.gen.gen.resource_directions.get(&resource),
+                        Some(Direction::Import)
+                    )
+                {
+                    let local = self.locals.tmp("resource");
+                    self.borrowed_resource_declarations
+                        .push(format!("{name} {local} = null;\n"));
+                    uwriteln!(self.src, "{local} = new {name}({op}, false);");
+                    self.borrowed_resources.push(local.clone());
+                    results.push(local);
+                    return;
+                }
+                let expression = match self.gen.gen.resource_directions.get(&resource) {
+                    Some(Direction::Export) if owned => {
+                        format!("{name}.fromOwnedHandle({op})")
+                    }
+                    Some(Direction::Export) => {
+                        format!("{name}.fromBorrowedHandle({op})")
+                    }
+                    _ => format!("new {name}({op}, {owned})"),
+                };
+                results.push(expression);
+            }
 
             Instruction::RecordLower { record, .. } => {
                 let op = &operands[0];
@@ -1788,6 +2001,9 @@ impl Bindgen for FunctionBindgen<'_, '_> {
                     {destructure}
                     "
                 );
+                for resource in self.borrowed_resources.drain(..) {
+                    uwriteln!(self.src, "{resource}.releaseBorrow();");
+                }
             }
 
             Instruction::Return { amt, .. } => {
