@@ -3,22 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 macro_rules! codegen_test {
-    // todo: implement resource support and then remove the following lines:
-    (resources $name:tt $test:tt) => {};
-    (resource_alias $name:tt $test:tt) => {};
-    (return_resource_from_export $name:tt $test:tt) => {};
-    (import_and_export_resource $name:tt $test:tt) => {};
-    (import_and_export_resource_alias $name:tt $test:tt) => {};
-    (resources_with_lists $name:tt $test:tt) => {};
-    (resource_local_alias $name:tt $test:tt) => {};
-    (resource_local_alias_borrow $name:tt $test:tt) => {};
-    (resource_local_alias_borrow_import $name:tt $test:tt) => {};
-    (resource_borrow_in_record $name:tt $test:tt) => {};
-    (resource_borrow_in_record_export $name:tt $test:tt) => {};
-    (resource_own_in_other_interface $name:tt $test:tt) => {};
     (same_names5 $name:tt $test:tt) => {};
-    (resources_in_aggregates $name:tt $test:tt) => {};
-    (issue668 $name:tt $test:tt) => {};
     (multiversion $name:tt $test:tt) => {};
     (wasi_cli $name:tt $test:tt) => {};
     (wasi_clocks $name:tt $test:tt) => {};
@@ -89,6 +74,26 @@ fn verify(dir: &Path, _name: &str) {
 
     for file in files {
         cmd.arg(file);
+    }
+
+    if dir.ends_with(Path::new("guest-teavm-java-resources/resources")) {
+        let imports =
+            fs::read_to_string(dir.join("src/main/java/wit/imports/Imports.java")).unwrap();
+        let exports =
+            fs::read_to_string(dir.join("src/main/java/wit/exports/Exports.java")).unwrap();
+        let worlds =
+            fs::read_to_string(dir.join("src/main/java/wit/worlds/Resources.java")).unwrap();
+
+        assert!(imports.contains("@Import(name = \"[resource-drop]y\", module = \"imports\")"));
+        assert!(imports.contains("(self).rawHandle()"));
+        assert!(imports.contains("(y).takeHandle()"));
+        assert!(imports.contains("public void close()"));
+        assert!(imports.contains("public void releaseBorrow()"));
+        assert!(imports.contains("if (!owned && handle != 0)"));
+        assert!(exports.contains("X.fromBorrowedHandle(p0)"));
+        assert!(exports.contains("X.fromOwnedHandle(p0)"));
+        assert!(exports.contains("(result).takeHandle()"));
+        assert!(worlds.contains("new wit.imports.my.resources.Types.Z(p0, false)"));
     }
 
     test_helpers::run_command(&mut cmd);
