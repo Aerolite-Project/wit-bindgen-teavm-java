@@ -30,6 +30,8 @@ mod resource_borrow_in_record;
 mod resource_borrow_simple;
 mod resource_floats;
 mod resource_import_and_export;
+mod java_exported_resource;
+mod java_borrow_lifetime;
 mod resource_into_inner;
 mod resource_with_lists;
 mod resources;

@@ -1,0 +1,15 @@
+package test:java-borrow-lifetime;
+
+interface host {
+  resource item {
+    ping: func() -> u32;
+  }
+}
+
+world java-borrow-lifetime {
+  import host;
+  use host.{item};
+
+  export test-a: func(value: borrow<item>);
+  export test-b: func(value: borrow<item>) -> u32;
+}

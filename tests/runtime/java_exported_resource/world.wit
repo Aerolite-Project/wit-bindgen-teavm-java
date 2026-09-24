@@ -1,0 +1,13 @@
+package test:java-exported-resource;
+
+interface test {
+  resource item {
+    constructor(value: u32);
+    get: func() -> u32;
+    set: func(value: u32);
+  }
+}
+
+world java-exported-resource {
+    export test;
+}
