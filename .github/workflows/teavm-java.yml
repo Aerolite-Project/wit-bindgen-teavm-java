@@ -1,0 +1,72 @@
+name: TeaVM Java backend
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  teavm-java:
+    name: TeaVM Java generator and resource validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+
+      - name: Print toolchain versions
+        run: |
+          rustc -Vv
+          cargo -V
+
+      - name: Install WASI target
+        run: rustup target add wasm32-wasip1
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '18'
+          distribution: adopt
+
+      - name: Download TeaVM
+        run: ci/download-teavm.sh
+
+      - name: Check TeaVM bundle
+        run: |
+          test -s target/teavm-cli-0.2.8.jar
+          test -s target/teavm-interop-0.2.8.jar
+          unzip -p target/teavm-cli-0.2.8.jar META-INF/MANIFEST.MF | grep -E 'Implementation-Version|Bundle-Version' || true
+
+      - name: Check TeaVM backend
+        run: cargo check -p wit-bindgen-teavm-java
+
+      - name: Run TeaVM Java codegen tests
+        run: cargo test -p wit-bindgen-teavm-java --test codegen
+
+      - name: Run generic component and resource runtime tests
+        run: cargo test --test runtime
+
+      - name: Run relevant upstream tests
+        run: |
+          cargo test -p wit-bindgen-cli --no-default-features --features rust,c,teavm-java
+          cargo test -p wit-bindgen-rust
+          cargo test -p wit-bindgen-c
+          cargo test -p wit-bindgen-teavm-java --test codegen
+
+      - name: Validate generated components
+        run: |
+          cargo install wasm-tools --locked
+          mapfile -t components < <(find target/generated -type f -name '*.component.wasm' -print)
+          test "${#components[@]}" -gt 0
+          for component in "${components[@]}"; do
+            wasm-tools validate "$component"
+          done
