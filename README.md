@@ -366,6 +366,26 @@ Java bytecode can be compiled to WebAssembly using
 `wit-bindgen` will emit `*.java` files which may be used with any JVM language,
 e.g. Java, Kotlin, Clojure, Scala, etc.
 
+The TeaVM Java backend supports WebAssembly Component Model resources. It
+generates Java wrappers for imported and exported resources, including handle
+lowering and lifting, ownership-aware lifecycle operations, resource
+representations, and borrowed-resource cleanup. Resource aliases are resolved
+before direction-sensitive lowering, and callback cleanup is zero-handle safe
+and idempotent.
+
+The component pipeline is:
+
+```text
+WIT -> wit-bindgen -> TeaVM Java bindings -> Java -> TeaVM -> WASM Component
+```
+
+For a WIT resource, the generated binding maintains the resource handle and
+its representation across the canonical ABI boundary:
+
+```text
+WIT resource -> Java wrapper -> handle -> representation -> canonical ABI
+```
+
 ### Guest: TinyGo
 
 The **new** TinyGo WIT bindings generator is currently in development at the
@@ -500,6 +520,11 @@ cargo build
 ```
 
 Learn more how to run the tests in the [testing document](tests/README.md).
+
+The TeaVM Java backend includes code generation coverage and generic runtime
+coverage for imported resources, exported resources, aliases, ownership,
+borrow lifetimes, callback cleanup, resource dropping, and component
+validation.
 
 # Versioning and Releases
 
