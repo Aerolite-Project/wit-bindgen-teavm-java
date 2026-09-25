@@ -31,6 +31,9 @@ jobs:
       - name: Install WASI target
         run: rustup target add wasm32-wasip1
 
+      - name: Install WASI SDK
+        uses: ./.github/actions/install-wasi-sdk
+
       - name: Install Java
         uses: actions/setup-java@v4
         with:
