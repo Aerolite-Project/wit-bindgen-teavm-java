@@ -56,7 +56,7 @@ jobs:
         run: cargo test -p wit-bindgen-teavm-java --test codegen
 
       - name: Run generic component and resource runtime tests
-        run: cargo test --test runtime
+        run: cargo test --no-default-features --features teavm-java --test runtime
 
       - name: Run relevant upstream tests
         run: |
